@@ -1,0 +1,48 @@
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 50
+  flyway:
+    enabled: true
+    clean-disabled: false
+  kafka:
+    # Overridden by tests that actually need a broker (KafkaIdempotencyIT starts
+    # its own container). Producers are lazy, so a wrong address here costs
+    # nothing for tests that never publish.
+    bootstrap-servers: localhost:19099
+
+signalforge:
+  security:
+    # Test-only key. Real deployments must supply SF_JWT_SECRET; the application
+    # refuses to start on a weak or placeholder value.
+    jwt-secret: "dGVzdC1vbmx5LXNpZ25pbmcta2V5LWZvci1zaWduYWxmb3JnZS1pbnRlZ3JhdGlvbi10ZXN0cw=="
+    jwt-issuer: signalforge-test
+    access-token-ttl: 10m
+    refresh-token-ttl: 1h
+    # 4 is bcrypt's minimum. At the production strength of 12 each hash costs
+    # ~250ms, which would add minutes to a suite that creates users constantly.
+    # The value under test is the wiring, not the cost factor.
+    bcrypt-strength: 4
+    login-max-attempts: 5
+    login-lockout-window: 1m
+    allowed-origins:
+      - http://localhost:3010
+
+  detection:
+    # Tests drive the evaluator explicitly so runs are deterministic; a
+    # background sweep firing mid-assertion is a recipe for a flaky suite.
+    enabled: false
+    evaluation-interval: 1h
+
+  ai:
+    enabled: false
+
+logging:
+  level:
+    org.testcontainers: WARN
+    com.github.dockerjava: WARN
+    org.hibernate.SQL: WARN

@@ -1,0 +1,183 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Test-only signing key. Real deployments supply SF_JWT_SECRET from a secret
+  # store; the application refuses to start on a placeholder value.
+  SF_JWT_SECRET: Y2ktb25seS1zaWduaW5nLWtleS1mb3Itc2lnbmFsZm9yZ2UtY29udGludW91cy1pbnRlZ3JhdGlvbg==
+
+jobs:
+  backend:
+    name: Backend build and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+          cache: maven
+
+      - name: Verify formatting
+        working-directory: backend
+        run: mvn -B spotless:check
+
+      - name: Compile
+        working-directory: backend
+        run: mvn -B -DskipTests compile
+
+      # Unit and slice tests. Fast, no containers.
+      - name: Unit tests
+        working-directory: backend
+        run: mvn -B test
+
+      # Integration tests. The GitHub runner has a Docker daemon, so
+      # Testcontainers starts real PostgreSQL, Redis and Kafka exactly as it
+      # does locally - no H2 or EmbeddedKafka substitution.
+      - name: Integration tests (Testcontainers)
+        working-directory: backend
+        run: mvn -B verify
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            backend/target/surefire-reports/
+            backend/target/failsafe-reports/
+          retention-days: 7
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: backend/target/site/jacoco/
+          retention-days: 7
+
+  frontend:
+    name: Frontend build and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # `npm ci` rather than `npm install`: it installs exactly the lockfile and
+      # fails if package.json and the lock have drifted, so CI cannot silently
+      # test a different dependency tree than the one committed.
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: frontend
+        run: npm run typecheck
+
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+      # Vitest only. The Playwright specs in frontend/e2e need the full stack
+      # running and are not wired into CI - see docs/STATUS.md.
+      - name: Unit tests
+        working-directory: frontend
+        run: npm test
+
+      - name: Production build
+        working-directory: frontend
+        run: npm run build
+
+  docker:
+    name: Docker image build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Only build the image once the code is known good; a green image from
+    # failing code is worse than no image.
+    needs: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: false
+          load: true
+          tags: signalforge/backend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Validate compose file
+        run: docker compose config --quiet
+        env:
+          SF_JWT_SECRET: ${{ env.SF_JWT_SECRET }}
+
+  security:
+    name: Dependency and secret scanning
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the secret scan can inspect the whole log, not just
+          # the tip commit.
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+          cache: maven
+
+      # OWASP Dependency-Check is free and open source. It is advisory here
+      # rather than a merge gate: CVE feeds produce false positives on
+      # transitive test-scope dependencies, and a build that cries wolf gets
+      # ignored. Findings are reviewed, not auto-blocking.
+      - name: Dependency vulnerability scan
+        working-directory: backend
+        continue-on-error: true
+        run: >
+          mvn -B org.owasp:dependency-check-maven:12.1.0:check
+          -DfailBuildOnCVSS=8
+          -DsuppressionFile=owasp-suppressions.xml
+          -DnvdApiDelay=8000
+
+      - name: Upload dependency-check report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-report
+          path: backend/target/dependency-check-report.html
+          retention-days: 14
+
+      - name: Scan history for committed secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

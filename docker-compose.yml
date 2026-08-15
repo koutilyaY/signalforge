@@ -1,0 +1,189 @@
+# SignalForge local stack.
+#
+# Port block is deliberately offset from the common defaults so this stack can
+# run alongside other local projects (5432/6379/9092/9090/3000/8080 are commonly
+# taken). Every port is overridable via .env.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sf-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-signalforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-signalforge}
+      POSTGRES_DB: ${POSTGRES_DB:-signalforge}
+    ports:
+      - "${POSTGRES_PORT:-5442}:5432"
+    volumes:
+      - sf-pgdata:/var/lib/postgresql/data
+    command:
+      # Small but realistic tuning so EXPLAIN ANALYZE numbers are not dominated
+      # by an untuned 128MB shared_buffers default.
+      - "postgres"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "work_mem=16MB"
+      - "-c"
+      - "max_connections=100"
+      - "-c"
+      - "track_io_timing=on"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-signalforge} -d ${POSTGRES_DB:-signalforge}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: sf-redis
+    ports:
+      - "${REDIS_PORT:-6389}:6379"
+    command: ["redis-server", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # Apache Kafka in KRaft mode - no ZooKeeper, single broker, Apache 2.0 licensed.
+  # Uses the official apache/kafka image (not Confluent) to stay unambiguously free.
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: sf-kafka
+    ports:
+      - "${KAFKA_PORT:-19092}:19092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:19092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:${KAFKA_PORT:-19092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+      CLUSTER_ID: signalforge-local-cluster
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  # One-shot topic creation. Topics are created explicitly (auto-create is off)
+  # so partition counts and retention are a deliberate, reviewable decision.
+  kafka-init:
+    image: apache/kafka:3.8.0
+    container_name: sf-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/scripts/create-topics.sh"]
+    volumes:
+      - ./infrastructure/kafka/create-topics.sh:/scripts/create-topics.sh:ro
+    restart: "no"
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: sf-prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9099}:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - sf-promdata:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    container_name: sf-grafana
+    ports:
+      - "${GRAFANA_PORT:-3011}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - sf-grafanadata:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sf-backend
+    ports:
+      - "${BACKEND_PORT:-8099}:8099"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SF_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-signalforge}
+      # Owner credentials: used by Flyway only, which needs CREATE ROLE.
+      SF_DB_USER: ${POSTGRES_USER:-signalforge}
+      SF_DB_PASSWORD: ${POSTGRES_PASSWORD:-signalforge}
+      # Runtime credentials: a restricted, non-superuser role created by V4 so
+      # row-level security actually applies. See V4__row_level_security.sql.
+      SF_DB_APP_USER: signalforge_app
+      SF_DB_APP_PASSWORD: ${SF_DB_APP_PASSWORD:-signalforge_app}
+      SF_REDIS_HOST: redis
+      SF_REDIS_PORT: 6379
+      SF_KAFKA_BOOTSTRAP: kafka:9092
+      SF_JWT_SECRET: ${SF_JWT_SECRET:?SF_JWT_SECRET must be set - see .env.example}
+      # AI is strictly optional. host.docker.internal reaches an Ollama running
+      # natively on the host; if it is absent the app degrades gracefully.
+      SF_AI_ENABLED: ${SF_AI_ENABLED:-false}
+      SF_AI_BASE_URL: ${SF_AI_BASE_URL:-http://host.docker.internal:11434}
+      SF_AI_MODEL: ${SF_AI_MODEL:-llama3.2:3b}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8099/actuator/health/readiness | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:${BACKEND_PORT:-8099}
+    container_name: sf-frontend
+    ports:
+      - "${FRONTEND_PORT:-3010}:3000"
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:${BACKEND_PORT:-8099}
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  sf-pgdata:
+  sf-promdata:
+  sf-grafanadata:

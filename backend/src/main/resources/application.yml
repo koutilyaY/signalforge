@@ -1,0 +1,190 @@
+spring:
+  application:
+    name: signalforge
+
+  datasource:
+    url: ${SF_DB_URL:jdbc:postgresql://localhost:5442/signalforge}
+    # The RUNTIME role. Deliberately NOT the owner and NOT a superuser: both
+    # bypass row-level security, which would make V4's policies decorative.
+    # See V4__row_level_security.sql.
+    username: ${SF_DB_APP_USER:signalforge_app}
+    password: ${SF_DB_APP_PASSWORD:signalforge_app}
+    hikari:
+      # Sized for the local stack. The rule of thumb is connections =
+      # (cores * 2) + effective_spindle_count; going higher moves contention
+      # from the app into PostgreSQL where it is far more expensive.
+      maximum-pool-size: 16
+      minimum-idle: 4
+      connection-timeout: 10000
+      validation-timeout: 3000
+      idle-timeout: 300000
+      max-lifetime: 900000
+      pool-name: sf-hikari
+
+  jpa:
+    open-in-view: false          # never hold a connection open across view rendering
+    hibernate:
+      ddl-auto: validate          # Flyway owns the schema; Hibernate only checks it
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 100
+          time_zone: UTC
+        order_inserts: true
+        order_updates: true
+        batch_versioned_data: true
+        query:
+          in_clause_parameter_padding: true   # fewer distinct plans in the cache
+
+  flyway:
+    enabled: true
+    baseline-on-migrate: false
+    validate-on-migrate: true
+    locations: classpath:db/migration
+    # Migrations run as the OWNER, which must be able to CREATE ROLE and ALTER
+    # TABLE. The runtime role above can do neither, by design.
+    url: ${SF_DB_URL:jdbc:postgresql://localhost:5442/signalforge}
+    user: ${SF_DB_USER:signalforge}
+    password: ${SF_DB_PASSWORD:signalforge}
+    placeholders:
+      app_role_password: ${SF_DB_APP_PASSWORD:signalforge_app}
+
+  data:
+    redis:
+      host: ${SF_REDIS_HOST:localhost}
+      port: ${SF_REDIS_PORT:6389}
+      timeout: 2s
+      connect-timeout: 2s
+      lettuce:
+        pool:
+          enabled: true
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+
+  kafka:
+    bootstrap-servers: ${SF_KAFKA_BOOTSTRAP:localhost:19092}
+
+  threads:
+    virtual:
+      enabled: true   # Java 21 virtual threads for the servlet container
+
+server:
+  port: ${SF_PORT:8099}
+  shutdown: graceful
+  error:
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+  compression:
+    enabled: true
+    mime-types: application/json
+    min-response-size: 2048
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when-authorized
+      group:
+        readiness:
+          # Redis is deliberately NOT a readiness dependency: the platform is
+          # designed to keep serving with Redis down (see ADR-0005), so a Redis
+          # outage must not take the whole API out of the load balancer.
+          include: db
+  health:
+    redis:
+      enabled: true
+  metrics:
+    tags:
+      application: signalforge
+  observations:
+    key-values:
+      application: signalforge
+  tracing:
+    sampling:
+      probability: ${SF_TRACE_SAMPLE_RATE:1.0}
+  otlp:
+    tracing:
+      endpoint: ${SF_OTLP_ENDPOINT:http://localhost:4318/v1/traces}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+  api-docs:
+    path: /v3/api-docs
+
+signalforge:
+  security:
+    jwt-secret: ${SF_JWT_SECRET:}
+    jwt-issuer: signalforge
+    access-token-ttl: 30m
+    refresh-token-ttl: 7d
+    allowed-origins:
+      - http://localhost:3010
+      - http://localhost:3000
+    bcrypt-strength: 12
+    login-max-attempts: 8
+    login-lockout-window: 15m
+
+  ingestion:
+    default-rate-limit-per-minute: 6000
+    max-batch-size: 500
+    max-event-age: 24h
+    max-clock-skew: 5m
+
+  detection:
+    enabled: true
+    evaluation-interval: 15s
+    idle-service-grace: 10m
+    max-rules-per-evaluation: 500
+
+  correlation:
+    deployment-lookback: 60m
+    evidence-window: 15m
+    max-related-services: 10
+    max-trace-samples: 25
+    max-error-signatures: 10
+
+  ai:
+    enabled: ${SF_AI_ENABLED:false}
+    base-url: ${SF_AI_BASE_URL:http://localhost:11434}
+    model: ${SF_AI_MODEL:llama3.2:3b}
+    timeout: 45s
+    max-evidence-items: 40
+    temperature: 0.1
+
+  cache:
+    service-health-ttl: 30s
+    organization-settings-ttl: 5m
+    dashboard-aggregate-ttl: 15s
+    incident-dedupe-lock-ttl: 30s
+
+logging:
+  level:
+    root: INFO
+    com.signalforge: ${SF_LOG_LEVEL:INFO}
+    org.springframework.kafka: WARN
+    org.apache.kafka: WARN
+
+---
+spring:
+  config:
+    activate:
+      on-profile: docker
+server:
+  port: 8099
+signalforge:
+  security:
+    allowed-origins:
+      - http://localhost:3010
+management:
+  otlp:
+    tracing:
+      endpoint: ${SF_OTLP_ENDPOINT:http://localhost:4318/v1/traces}

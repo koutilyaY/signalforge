@@ -1,0 +1,203 @@
+{
+  "uid": "signalforge-pipeline",
+  "title": "SignalForge — Ingestion & Detection Pipeline",
+  "tags": ["signalforge"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Ingestion",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Telemetry events accepted vs rejected",
+      "description": "Rejections are validation failures (unknown service, bad timestamp, intra-batch duplicate). A sustained non-zero rejected line means a producer is misconfigured.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(signalforge_ingest_events_total[1m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Ingestion publish latency",
+      "description": "Time to validate a batch and hand it to the Kafka producer. This is what the ingestion endpoint's p95 is made of.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(signalforge_ingest_publish_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(signalforge_ingest_publish_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Kafka consumer",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Consumer outcomes",
+      "description": "'duplicate' is the idempotency constraint absorbing a redelivery — expected and healthy, not an error. A rising 'poison' line means malformed messages are reaching the DLT.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(signalforge_consumer_events_total[1m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "End-to-end pipeline lag (ingest → persisted)",
+      "description": "How long a record spends between being accepted by the API and landing in PostgreSQL. This is the number the ingestion SLO is written against.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(signalforge_pipeline_ingest_to_persist_seconds_bucket[5m])))",
+          "legendFormat": "p99",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(signalforge_pipeline_ingest_to_persist_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Detection",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 }
+    },
+    {
+      "type": "stat",
+      "title": "Incidents opened (1h)",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 19 },
+      "targets": [
+        {
+          "expr": "increase(signalforge_detection_incidents_opened_total[1h])",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Detection sweep duration",
+      "description": "Time to evaluate every enabled rule across all tenants. If this approaches the evaluation interval, sweeps start backing up and detection latency degrades.",
+      "gridPos": { "h": 6, "w": 9, "x": 6, "y": 19 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(signalforge_detection_sweep_seconds_bucket[5m])))",
+          "legendFormat": "p95 sweep",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Rule evaluations per second",
+      "gridPos": { "h": 6, "w": 9, "x": 15, "y": 19 },
+      "targets": [
+        {
+          "expr": "rate(signalforge_detection_evaluations_total[1m])",
+          "legendFormat": "evaluations/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "API & platform",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 }
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP p95 latency by endpoint",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, uri) (rate(http_server_requests_seconds_bucket{uri!~\"/actuator.*\"}[5m])))",
+          "legendFormat": "{{uri}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP responses by status",
+      "description": "429s here are the per-tenant ingestion rate limiter doing its job, not a fault.",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 26 },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(http_server_requests_seconds_count[1m]))",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "HikariCP connections in use",
+      "description": "Approaching the pool maximum means requests are queuing on a connection, which shows up as latency everywhere at once.",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 26 },
+      "targets": [
+        { "expr": "hikaricp_connections_active", "legendFormat": "active", "refId": "A" },
+        { "expr": "hikaricp_connections_max", "legendFormat": "max", "refId": "B" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Open SSE connections",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 34 },
+      "targets": [{ "expr": "signalforge_stream_connections", "refId": "A" }]
+    },
+    {
+      "type": "stat",
+      "title": "JVM heap used",
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 34 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        { "expr": "sum(jvm_memory_used_bytes{area=\"heap\"})", "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "AI summary outcomes",
+      "description": "'unavailable' is a supported operating mode, not an incident. 'rejected_claims' counts model-stated causes discarded for not being supported by the evidence bundle.",
+      "gridPos": { "h": 5, "w": 12, "x": 12, "y": 34 },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(signalforge_ai_summaries_total[5m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(signalforge_ai_rejected_claims_total[5m])",
+          "legendFormat": "rejected claims",
+          "refId": "B"
+        }
+      ]
+    }
+  ]
+}

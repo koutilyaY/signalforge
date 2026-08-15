@@ -1,0 +1,39 @@
+# Secrets - never commit
+.env
+*.pem
+*.key
+!**/src/**/*.key
+
+# Java / Maven
+backend/target/
+*.class
+*.jar
+!**/maven-wrapper.jar
+.mvn/wrapper/maven-wrapper.jar
+
+# Node / Next.js
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/next-env.d.ts
+frontend/playwright-report/
+frontend/test-results/
+frontend/blob-report/
+frontend/.playwright/
+*.tsbuildinfo
+
+# k6
+load-tests/results/*.json
+load-tests/results/*.html
+!load-tests/results/.gitkeep
+
+# OS / IDE
+.DS_Store
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# Logs
+*.log
+logs/
