@@ -137,17 +137,41 @@ jobs:
         env:
           SF_JWT_SECRET: ${{ env.SF_JWT_SECRET }}
 
-  security:
-    name: Dependency and secret scanning
+  # Deliberately its own job, and deliberately first.
+  #
+  # These two scans used to share a job, with the secret scan second. The
+  # dependency scan reliably outran the job timeout, so the step that actually
+  # matters on a public repository was reported as `skipped` on every run - a
+  # secret scan that has never executed, sitting under a green-ish check. Split
+  # apart, a slow CVE feed can no longer suppress it.
+  secrets:
+    name: Secret scanning
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history so the secret scan can inspect the whole log, not just
-          # the tip commit.
+          # Full history so the scan inspects the whole log, not just the tip
+          # commit. A secret that was committed and later removed is still
+          # published.
           fetch-depth: 0
+
+      - name: Scan history for committed secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependencies:
+    name: Dependency vulnerability scan (advisory)
+    runs-on: ubuntu-latest
+    # Generous, because an uncached NVD feed is genuinely slow. The job is
+    # advisory, so a long run costs time rather than a red build.
+    timeout-minutes: 45
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -156,18 +180,36 @@ jobs:
           distribution: temurin
           cache: maven
 
-      # OWASP Dependency-Check is free and open source. It is advisory here
-      # rather than a merge gate: CVE feeds produce false positives on
-      # transitive test-scope dependencies, and a build that cries wolf gets
-      # ignored. Findings are reviewed, not auto-blocking.
+      # Without this the job re-downloads the entire NVD feed every run, which
+      # is what made it exceed the old timeout in the first place.
+      - name: Cache the NVD database
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/owasp/dependency-check-data
+          key: nvd-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: nvd-${{ runner.os }}-
+
+      # OWASP Dependency-Check is free and open source. It is advisory rather
+      # than a merge gate: CVE feeds produce false positives on transitive
+      # test-scope dependencies, and a build that cries wolf gets ignored.
+      # Findings are reviewed, not auto-blocking.
+      #
+      # NVD_API_KEY is optional. Set it in repository secrets to lift the
+      # unauthenticated rate limit; without it the scan still runs, just slowly.
       - name: Dependency vulnerability scan
         working-directory: backend
         continue-on-error: true
-        run: >
-          mvn -B org.owasp:dependency-check-maven:12.1.0:check
-          -DfailBuildOnCVSS=8
-          -DsuppressionFile=owasp-suppressions.xml
-          -DnvdApiDelay=8000
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          ARGS="-DfailBuildOnCVSS=8 -DsuppressionFile=owasp-suppressions.xml"
+          if [ -n "$NVD_API_KEY" ]; then
+            ARGS="$ARGS -DnvdApiKey=$NVD_API_KEY"
+          else
+            echo "::notice::NVD_API_KEY not set - scanning unauthenticated and throttled."
+            ARGS="$ARGS -DnvdApiDelay=8000"
+          fi
+          mvn -B org.owasp:dependency-check-maven:12.1.0:check $ARGS
 
       - name: Upload dependency-check report
         if: always()
@@ -176,8 +218,3 @@ jobs:
           name: dependency-check-report
           path: backend/target/dependency-check-report.html
           retention-days: 14
-
-      - name: Scan history for committed secrets
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
