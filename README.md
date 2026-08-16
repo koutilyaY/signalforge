@@ -164,7 +164,18 @@ consumer rebalancing.
 cd backend && mvn verify
 ```
 
-Requires Java 21 and a running Docker daemon.
+Requires Java 21 and a running Docker daemon. Run it from a clean `target/` — a stale
+`surefire-reports/` is read as a current result, which is how a week-old failure briefly passed for
+a live one here.
+
+Frontend:
+
+```bash
+cd frontend && npm ci && npm test
+```
+
+`npm test` is Vitest, and it deliberately excludes `e2e/`. Those are Playwright specs that have
+never been executed — see [docs/STATUS.md](docs/STATUS.md).
 
 ## What the tests actually prove
 
