@@ -29,9 +29,10 @@ employer is the kind of thing that ends an interview badly when someone asks a c
 >   path instead of computing `percentile_cont` over raw events, reducing median execution time from
 >   **755 ms to 0.04 ms** on a 2.1M-row dataset with p95 accuracy within 0.1%.
 >
-> - Enforced multi-tenant isolation via token-derived tenant scoping on every query and verified it
->   with **102 automated tests** including cross-tenant and role-based negative cases, covering
->   PostgreSQL, Redis and Kafka through Testcontainers.
+> - Enforced multi-tenant isolation in depth — token-derived tenant scoping on every query, backed
+>   by PostgreSQL row-level security with the application running as a non-owning database role —
+>   and verified it with **125 automated tests** including cross-tenant and role-based negative
+>   cases, covering PostgreSQL, Redis and Kafka through Testcontainers.
 
 ---
 
@@ -45,7 +46,8 @@ that", the answer is a file path.
 | 64,000 events/sec, 23 ms p95 | `docs/benchmarks/README.md` §1 — measured 63,991 events/sec, p95 23.2 ms. Rounded **down**. |
 | 755 ms → 0.04 ms | `docs/benchmarks/README.md` §2 — medians of 5 runs each (754.8 ms, 0.040 ms) on 2,154,690 rows |
 | p95 accuracy within 0.1% | Same section — exact 449.0 ms vs interpolated 449.4 ms = 0.09% |
-| 102 tests | `mvn verify` → 26 unit + 76 integration, 0 failures |
+| 125 tests | `mvn verify` → 37 unit + 88 integration, 0 failures (plus 19 frontend Vitest tests) |
+| Row-level security | `RowLevelSecurityIT` — raw SQL with no tenant predicate returns nothing; `V4__row_level_security.sql` |
 | Idempotency under concurrent redelivery | `TelemetryIdempotencyIT.concurrentDuplicateDeliveryIsSafe` — 3 threads, same batch |
 | Cross-tenant negatives | `TenantIsolationIT` (10 tests), `AuthorizationIT` (13 tests) |
 
@@ -88,7 +90,9 @@ framing is:
 > trust is the query optimisation ratio and the correctness properties, because those are
 > hardware-independent. The interesting parts are the failure modes I found: the rollup aggregation
 > was double-counting on Kafka redelivery, dead-letter routing was configured but structurally
-> unreachable, and my own detection-latency metric turned out to be measuring the wrong thing."
+> unreachable, my own detection-latency metric turned out to be measuring the wrong thing, and my
+> first row-level-security migration applied cleanly while enforcing absolutely nothing, because
+> Postgres exempts table owners from RLS and the app was connecting as the owner."
 
 That last sentence is worth more than the throughput number. Finding your own bugs and saying so is
 the signal.
